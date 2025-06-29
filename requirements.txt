@@ -1,0 +1,30 @@
+# Cullinan Hotel Chatbot - Gerekli Kütüphaneler
+
+# Ana AI ve NLP kütüphaneleri
+openai>=1.0.0
+chromadb>=0.4.0
+tenacity>=8.0.0
+
+# Streamlit web arayüzü
+streamlit>=1.28.0
+
+# UI ve görselleştirme
+plotly>=5.15.0
+matplotlib>=3.7.0
+seaborn>=0.12.0
+pandas>=2.0.0
+numpy>=1.24.0
+
+# Yardımcı kütüphaneler
+python-dotenv>=1.0.0
+requests>=2.31.0
+
+# Development ve testing (opsiyonel)
+pytest>=7.4.0
+pytest-asyncio>=0.21.0
+black>=23.7.0
+flake8>=6.0.0
+
+# Gelişmiş özellikler için (opsiyonel)
+watchdog>=3.0.0  # Dosya izleme
+psutil>=5.9.0    # Sistem monitörü
