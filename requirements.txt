@@ -28,3 +28,4 @@ flake8>=6.0.0
 # Gelişmiş özellikler için (opsiyonel)
 watchdog>=3.0.0  # Dosya izleme
 psutil>=5.9.0    # Sistem monitörü
+Pillow>=10.0.0   # Görsel işleme
