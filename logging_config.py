@@ -45,7 +45,7 @@ class JSONFormatter(logging.Formatter):
         if hasattr(record, 'request_id'):
             log_data['request_id'] = record.request_id
         if hasattr(record, 'user_input'):
-            log_data['user_input'] = record.user_input
+            log_data['user_input'] = record.user_input  
         if hasattr(record, 'bot_response'):
             log_data['bot_response'] = record.bot_response
         if hasattr(record, 'intent'):

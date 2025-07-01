@@ -1,340 +1,246 @@
-"""
-chains/booking_dialog.py
-––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––
-(⇽ önceki sürümden fark: _llm_enrich_state içinde 'reply' inşası)
-"""
+# chains/booking_dialog.py
+# =====================================================================
+# Cullinan Hotel – Akıcı Rezervasyon Diyaloğu (URL dahili)
+# =====================================================================
 from __future__ import annotations
-from typing import Dict, Any, Tuple, List
-from datetime import datetime
+import logging, re, time
+from datetime import datetime, date
+from typing import Dict, Any, List, Tuple
 from urllib.parse import urlencode, quote_plus
-import re
-import time
-import logging
-from openai import OpenAI
-from logging_config import log_api_call
+from openai import OpenAI            # pip install openai>=1.0
 
-# Logger
-logger = logging.getLogger("hotel_chatbot.booking_dialog")
+# ---------------------------------------------------------------------
+# Genel Ayarlar
+# ---------------------------------------------------------------------
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+log = logging.getLogger("hotel_chatbot.booking_dialog")
 
-CHAT_MODEL = "gpt-4o-mini"
-client = OpenAI()
+def timed(tag):
+    def deco(fn):
+        def wrap(*a, **kw):
+            t0 = time.time()
+            try:
+                return fn(*a, **kw)
+            finally:
+                log.debug("%s %.0f ms", tag, (time.time() - t0) * 1000)
+        return wrap
+    return deco
 
-HOTEL_ID   = 114738
-DOMAIN     = "www.cullinanhotels.com"
-LANGUAGEID = 1
-ANCHOR     = "guestsandrooms"
+CHAT_MODEL  = "gpt-4o-mini"
+client      = OpenAI()
 
-REQ = [
+HOTEL_ID    = 114_738
+DOMAIN      = "www.cullinanhotels.com"
+LANGUAGEID  = 1
+ANCHOR      = "guestsandrooms"
+
+# Zorunlu alanlar  (çocuk sayısı 0 olabilir)
+REQUIRED = [
     "giris_tarihi",
     "cikis_tarihi",
-    "oda_sayisi",
     "yetiskin_sayisi",
     "cocuk_sayisi",
-    "cocuk_yaslari",
+    "oda_sayisi"
 ]
 
-SYSTEM_PROMPT = """
-Sen Cullinan Hotel'in rezervasyon asistanısın.
-Aşağıda "state" sözlüğünde eksik alanları sırayla ve net sorularla tamamla.
-• Gereken alanlar → giris_tarihi, cikis_tarihi (YYYY-MM-DD),
-  oda_sayisi, yetiskin_sayisi, cocuk_sayisi, cocuk_yaslari (örn: 8,5)
-• İlk satır her zaman KULLANICIYA GÖRÜNECEK mesajdır.
-• Mesajın alt satırlarında bulduğun bilgileri `alan=deger` biçiminde ekle.
-• Tarihleri mutlaka `YYYY-MM-DD` formatında döndür. 
-"""
+# ---------------------------------------------------------------------
+# Yardımcı Fonksiyonlar
+# ---------------------------------------------------------------------
+def _to_tc(iso: str) -> str:
+    """ISO (YYYY-MM-DD) → MM/DD/YYYY (TravelClick)"""
+    return datetime.strptime(iso, "%Y-%m-%d").strftime("%m/%d/%Y")
 
-MONTHS_TR_EN = {
-    "Ocak": "January",   "Şubat": "February", "Mart": "March",
-    "Nisan": "April",    "Mayıs": "May",      "Haziran": "June",
-    "Temmuz": "July",    "Ağustos": "August", "Eylül": "September",
-    "Ekim": "October",   "Kasım": "November", "Aralık": "December",
-}
+def build_url(state: Dict[str, Any]) -> str:
+    """State → TravelClick URL"""
+    params = dict(
+        adults     = state["yetiskin_sayisi"],
+        datein     = _to_tc(state["giris_tarihi"]),
+        dateout    = _to_tc(state["cikis_tarihi"]),
+        rooms      = state["oda_sayisi"],
+        domain     = DOMAIN,
+        languageid = LANGUAGEID
+    )
+    if state["cocuk_sayisi"]:
+        params["children"] = state["cocuk_sayisi"]
+        if state.get("cocuk_yaslari"):
+            params["childage"] = ",".join(f"{a:02d}" for a in state["cocuk_yaslari"])
+    return (
+        f"https://bookings.travelclick.com/{HOTEL_ID}"
+        f"?{urlencode(params, quote_via=quote_plus)}#/{ANCHOR}"
+    )
 
-_date_num_pat = re.compile(r"\d+")
+def param_summary(st: Dict[str, Any]) -> str:
+    """Kullanıcıya okunabilir parametre özeti"""
+    chunks = [
+        f"datein={_to_tc(st['giris_tarihi'])}",
+        f"dateout={_to_tc(st['cikis_tarihi'])}",
+        f"adults={st['yetiskin_sayisi']}",
+        f"rooms={st['oda_sayisi']}"
+    ]
+    if st["cocuk_sayisi"]:
+        chunks.append(f"children={st['cocuk_sayisi']}")
+        if st.get("cocuk_yaslari"):
+            chunks.append(
+                "childage=" + ",".join(f"{a:02d}" for a in st["cocuk_yaslari"])
+            )
+    return ", ".join(chunks)
 
-# —————————————————— Yardımcı fonksiyonlar ——————————————————
-def _tr_to_en_month(text: str) -> str:
-    for tr, en in MONTHS_TR_EN.items():
-        text = re.sub(rf"\b{tr}\b", en, text, flags=re.IGNORECASE)
-    return text
+def missing(st: Dict[str, Any]) -> List[str]:
+    """Eksik zorunlu alanları döndürür."""
+    m = [k for k in REQUIRED if k not in st]
+    if st.get("cocuk_sayisi") and "cocuk_yaslari" not in st:
+        m.append("cocuk_yaslari")
+    return m
 
-def _normalize_date(text: str) -> str | None:
-    """Tarih string'ini YYYY-MM-DD formatına dönüştürür"""
-    text = text.strip()
-    logger.debug(f"Normalizing date: {text}")
-    
-    try:
-        if "-" in text:
-            normalized = datetime.strptime(text, "%Y-%m-%d").date().isoformat()
-            logger.debug(f"Date normalized from ISO format: {text} -> {normalized}")
-            return normalized
-        if "/" in text:
-            normalized = datetime.strptime(text, "%d/%m/%Y").date().isoformat()
-            logger.debug(f"Date normalized from dd/mm/yyyy format: {text} -> {normalized}")
-            return normalized
-        eng = _tr_to_en_month(text)
-        normalized = datetime.strptime(eng, "%d %B %Y").date().isoformat()
-        logger.debug(f"Date normalized from Turkish format: {text} -> {normalized}")
-        return normalized
-    except ValueError as e:
-        logger.warning(f"Failed to normalize date '{text}': {str(e)}")
-        return None
+def summary(st: Dict[str, Any]) -> str:
+    """Kullanıcıya onay özeti."""
+    gi = datetime.strptime(st["giris_tarihi"], "%Y-%m-%d").strftime("%d %B %Y")
+    co = datetime.strptime(st["cikis_tarihi"], "%Y-%m-%d").strftime("%d %B %Y")
+    msg = (
+        f"🔎 Bilgileriniz:\n"
+        f"• {gi} → {co}\n"
+        f"• Yetişkin: {st['yetiskin_sayisi']}\n"
+        f"• Çocuk: {st['cocuk_sayisi']}\n"
+        f"• Oda: {st['oda_sayisi']}"
+    )
+    if st["cocuk_sayisi"]:
+        yas = ", ".join(map(str, st.get("cocuk_yaslari", []))) or "—"
+        msg += f" (Yaş: {yas})"
+    return msg + "\n\nOnaylıyor musunuz?"
 
-def _ints_in(t: str) -> List[int]:
-    """String içindeki tüm sayıları bulur"""
-    numbers = list(map(int, _date_num_pat.findall(t)))
-    logger.debug(f"Extracted numbers from '{t}': {numbers}")
-    return numbers
+# ---------------------------------------------------------------------
+# Sistem Mesajı
+# ---------------------------------------------------------------------
+def system_prompt(st: Dict[str, Any]) -> str:
+    today = date.today().isoformat()
+    known = {k: v for k, v in st.items() if k not in {"history"}}
+    miss  = missing(st)
 
-def build_url(
-    hotel_id: int,
-    date_in: str,
-    date_out: str,
-    adults: int,
-    child_ages: list[int],
-    rooms: int = 1,
-    domain: str = DOMAIN,
-    languageid: int = LANGUAGEID,
-    anchor: str = ANCHOR,
-    extra: dict | None = None,
-) -> str:
-    """Rezervasyon URL'si oluşturur"""
-    def _fmt(d: str) -> str:
-        if "/" in d:
-            return d
-        return datetime.strptime(d, "%Y-%m-%d").strftime("%m/%d/%Y")
+    instr = (
+        "Sen Cullinan Hotel’in Türkçe konuşan sanal rezervasyon asistanısın.\n"
+        "• Kullanıcıyı biçimlere zorlamadan, **tek ve kapsayıcı sorularla** "
+        "giriş/çıkış tarihleri, yetişkin & çocuk sayısı, oda sayısı ve "
+        "(gerekirse) çocuk yaşlarını öğren.\n"
+        "• Eksik birden çok alan varsa şu tip sor: "
+        "“Hangi tarihler arasında, kaç yetişkin ve çocukla, kaç odada "
+        "konaklamayı planlıyorsunuz?”\n"
+        "• Gereksiz hiçbir detay isteme.\n"
+        "• **Tüm** alanlar tamamlandığında özetle ve mutlaka *‘evet/hayır’* "
+        "onayı iste. Kullanıcı onay verirse, aşağıdaki *ikinci bölümde* "
+        "KESİNLİKLE `karar=ONAY` satırı bulunsun.\n"
+        "• Cevaplarının İKİ bölümü olsun, `---` çizgisiyle ayır:\n"
+        "  1) Kullanıcıya giden sohbet metni.\n"
+        "  2) Çıkardığın veriler: her satır `anahtar=deger` veya `karar=ONAY/RED`.\n"
+        "• Tarihleri ISO `YYYY-MM-DD` biçiminde döndür.\n"
+    )
 
-    params = {
-        "adults": adults,
-        "datein": _fmt(date_in),
-        "dateout": _fmt(date_out),
-        "rooms": rooms,
-        "domain": domain,
-        "languageid": languageid,
-    }
-    if child_ages:
-        params.update({"children": len(child_ages),
-                       "childage": ",".join(f"{a:02d}" for a in child_ages)})
-    if extra:
-        params.update(extra)
+    context = ("Eksik alanlar: " + (", ".join(miss) if miss else
+               "— yok, onay iste."))
+    return f"{instr}\nBugün: {today}\nToplanan veriler: {known or '—'}\n{context}"
 
-    url = f"https://bookings.travelclick.com/{hotel_id}?{urlencode(params, quote_via=quote_plus)}#/{anchor}"
-    
-    logger.info(f"Booking URL generated", extra={
-        'hotel_id': hotel_id,
-        'check_in': date_in,
-        'check_out': date_out,
-        'adults': adults,
-        'children': len(child_ages),
-        'child_ages': child_ages,
-        'rooms': rooms,
-        'url_length': len(url)
-    })
-    
-    return url
+# ---------------------------------------------------------------------
+# LLM Çağrısı
+# ---------------------------------------------------------------------
+@timed("LLM")
+def llm_step(state: Dict[str, Any]) -> Tuple[str, Dict[str, str]]:
+    msgs = [{"role": "system", "content": system_prompt(state)}] + state["history"]
+    resp = client.chat.completions.create(
+        model       = CHAT_MODEL,
+        messages    = msgs,
+        temperature = 0.2,
+        max_tokens  = 350
+    )
+    raw = resp.choices[0].message.content.strip()
+    part1, part2 = (raw.split("---", 1) + ["", ""])[:2]
 
-# —————————————————— State güncelleme ——————————————————
-def _update_state_regex(state: Dict[str, Any], user_msg: str) -> Dict[str, Any]:
-    """Regex kullanarak state'i günceller"""
-    logger.debug(f"Updating state with regex for message: {user_msg}")
-    initial_state = state.copy()
-    
-    if "giris_tarihi" not in state:
-        if d := _normalize_date(user_msg):
-            state["giris_tarihi"] = d
-            logger.info(f"Check-in date extracted: {d}")
-    elif "cikis_tarihi" not in state:
-        if d := _normalize_date(user_msg):
-            state["cikis_tarihi"] = d
-            logger.info(f"Check-out date extracted: {d}")
+    data: Dict[str, str] = {}
+    for line in part2.strip().splitlines():
+        if "=" in line:
+            k, v = line.split("=", 1)
+            data[k.strip()] = v.strip()
+    return part1.strip(), data
 
-    nums = _ints_in(user_msg)
-    if nums:
-        if "oda_sayisi" not in state:
-            state["oda_sayisi"] = nums.pop(0)
-            logger.info(f"Room count extracted: {state['oda_sayisi']}")
-        if nums and "yetiskin_sayisi" not in state:
-            state["yetiskin_sayisi"] = nums.pop(0)
-            logger.info(f"Adult count extracted: {state['yetiskin_sayisi']}")
-        if nums and "cocuk_sayisi" not in state:
-            state["cocuk_sayisi"] = nums.pop(0)
-            logger.info(f"Child count extracted: {state['cocuk_sayisi']}")
+def merge(state: Dict[str, Any], data: Dict[str, str]) -> None:
+    if "giris_tarihi"   in data: state["giris_tarihi"]   = data["giris_tarihi"]
+    if "cikis_tarihi"   in data: state["cikis_tarihi"]   = data["cikis_tarihi"]
+    if "yetiskin_sayisi" in data:
+        try: state["yetiskin_sayisi"] = int(data["yetiskin_sayisi"])
+        except: pass
+    if "cocuk_sayisi" in data:
+        try: state["cocuk_sayisi"] = int(data["cocuk_sayisi"])
+        except: pass
+    if "oda_sayisi"   in data:
+        try: state["oda_sayisi"]   = int(data["oda_sayisi"])
+        except: pass
+    if "cocuk_yaslari" in data:
+        state["cocuk_yaslari"] = [int(n) for n in re.findall(r"\d+", data["cocuk_yaslari"])]
 
-    ages = [int(a) for a in user_msg.split(",") if a.strip().isdigit()]
-    if ages and "cocuk_yaslari" not in state:
-        state["cocuk_yaslari"] = ages
-        logger.info(f"Child ages extracted: {ages}")
+# Heuristik “evet/onay” kelimeleri
+_POSITIVE_WORDS = ("onay", "evet", "kabul", "tamam", "olur", "onaylıyorum",
+                   "onayladım", "peki")
 
-    # State değişikliklerini logla
-    changes = {}
-    for key, value in state.items():
-        if key not in initial_state or initial_state[key] != value:
-            changes[key] = value
-    
-    if changes:
-        logger.info(f"State updated via regex", extra={'changes': changes})
+def _user_confirms(text: str) -> bool:
+    t = text.lower()
+    return any(w in t for w in _POSITIVE_WORDS)
 
-    return state
-
-# —————————————————— LLM enrich ——————————————————
-@log_api_call("OpenAI Chat Completion")
-def _llm_enrich_state(state: Dict[str, Any], user_msg: str) -> Tuple[Dict[str, Any], str]:
-    """LLM kullanarak state'i zenginleştirir"""
-    logger.info(f"Enriching state with LLM", extra={
-        'current_state': state,
-        'user_message': user_msg
-    })
-    
-    start_time = time.time()
-    
-    try:
-        messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "system", "content": f"state={state}"},
-            {"role": "user",   "content": user_msg},
-        ]
-        
-        completion = client.chat.completions.create(
-            model=CHAT_MODEL, 
-            messages=messages,
-            temperature=0.1,
-            max_tokens=300
-        )
-        
-        raw = completion.choices[0].message.content.strip()
-        execution_time = (time.time() - start_time) * 1000
-        
-        logger.debug(f"LLM raw response: {raw}")
-
-        lines = [ln.rstrip() for ln in raw.splitlines() if ln.strip()]
-        # Kullanıcıya gösterilecek satırlar: "=" içermeyenler
-        visible = [ln for ln in lines if "=" not in ln]
-        reply   = "\n".join(visible) if visible else lines[0]
-
-        # State güncelle
-        initial_state = state.copy()
-        extracted_fields = {}
-        
-        for ln in lines:
-            if "=" not in ln:
-                continue
-            k, v = map(str.strip, ln.split("=", 1))
-            match k:
-                case "giris_tarihi" | "cikis_tarihi":
-                    if norm := _normalize_date(v):
-                        state[k] = norm
-                        extracted_fields[k] = norm
-                case "oda_sayisi" | "yetiskin_sayisi" | "cocuk_sayisi":
-                    if v.isdigit():
-                        state[k] = int(v)
-                        extracted_fields[k] = int(v)
-                case "cocuk_yaslari":
-                    ages = [int(a) for a in _ints_in(v)]
-                    state[k] = ages
-                    extracted_fields[k] = ages
-
-        # Token kullanımı
-        usage = completion.usage
-        
-        logger.info(f"LLM state enrichment completed", extra={
-            'execution_time': execution_time,
-            'extracted_fields': extracted_fields,
-            'reply_length': len(reply),
-            'prompt_tokens': usage.prompt_tokens if usage else None,
-            'completion_tokens': usage.completion_tokens if usage else None,
-            'total_tokens': usage.total_tokens if usage else None
-        })
-        
-        return state, reply
-        
-    except Exception as e:
-        execution_time = (time.time() - start_time) * 1000
-        logger.error(f"LLM state enrichment failed: {str(e)}", extra={
-            'execution_time': execution_time,
-            'user_message': user_msg,
-            'current_state': state
-        }, exc_info=True)
-        
-        # Fallback reply
-        fallback_reply = "Üzgünüm, bilgilerinizi işlerken bir sorun yaşadım. Lütfen tekrar deneyin."
-        return state, fallback_reply
-
-# —————————————————— Dışa açık fonksiyon ——————————————————
+# ---------------------------------------------------------------------
+# Ana Fonksiyon
+# ---------------------------------------------------------------------
 def handle_booking(
     state: Dict[str, Any],
-    user_msg: str,
+    user_msg: str
 ) -> Tuple[Dict[str, Any], str, bool]:
     """
-    Rezervasyon diyaloğunu yönetir
+    ► state    : Oturum belleği (ilk çağrıda {})
+    ► user_msg : Kullanıcı mesajı
+    ◄ returns  : (güncellenmiş state, asistan cevabı, işlem tamam mı)
     """
-    logger.info(f"Handling booking dialog", extra={
-        'current_state_keys': list(state.keys()),
-        'user_message': user_msg,
-        'missing_fields': [k for k in REQ if k not in state]
-    })
-    
-    start_time = time.time()
-    
-    try:
-        # Regex ile state güncelle
-        state = _update_state_regex(state, user_msg)
-        missing = [k for k in REQ if k not in state]
+    if "history" not in state:
+        state["history"] = []
 
-        logger.debug(f"After regex update, missing fields: {missing}")
+    state["history"].append({"role": "user", "content": user_msg})
 
-        if missing:
-            # LLM ile zenginleştir
-            state, reply = _llm_enrich_state(state, user_msg)
-            execution_time = (time.time() - start_time) * 1000
-            
-            logger.info(f"Booking dialog incomplete", extra={
-                'execution_time': execution_time,
-                'remaining_fields': [k for k in REQ if k not in state],
-                'response_type': 'continue_dialog'
-            })
-            
-            return state, reply, False
+    # LLM yanıtı
+    reply, parsed = llm_step(state)
+    merge(state, parsed)
 
-        # Tüm alanlar tamamlandı - URL oluştur
-        child_ages = (
-            state["cocuk_yaslari"]
-            if isinstance(state["cocuk_yaslari"], list)
-            else [int(a) for a in _ints_in(str(state["cocuk_yaslari"]))]
-        )
+    # Tamamlandı mı?
+    finished = False
+    no_missing = not missing(state)
 
-        url = build_url(
-            hotel_id   = HOTEL_ID,
-            date_in    = state["giris_tarihi"],
-            date_out   = state["cikis_tarihi"],
-            adults     = state["yetiskin_sayisi"],
-            child_ages = child_ages,
-            rooms      = state["oda_sayisi"],
-        )
+    # 1) LLM 'karar=ONAY' dedi → kesin
+    if parsed.get("karar") == "ONAY" and no_missing:
+        finished = True
+    # 2) Heuristik: Kullanıcı mesajı doğrudan onay içeriyor + eksik yok
+    elif no_missing and _user_confirms(user_msg):
+        finished = True
 
+    # Bağlantı oluştur ve yanıtı güncelle
+    if finished:
+        url  = build_url(state)
+        pstr = param_summary(state)
         reply = (
-            "Rezervasyon bilgileriniz hazır! Aşağıdaki bağlantıdan güvenle "
-            f"işlemi tamamlayabilirsiniz:\n{url}"
+            "✅ Harika! Rezervasyon bağlantınız hazır:\n"
+            f"{url}\n\n"
+            f"🔧 *Parametre özeti*: {pstr}"
         )
-        
-        execution_time = (time.time() - start_time) * 1000
-        
-        logger.info(f"Booking dialog completed successfully", extra={
-            'execution_time': execution_time,
-            'final_state': state,
-            'booking_url_generated': True,
-            'response_type': 'booking_complete'
-        })
-        
-        return state, reply, True
-        
-    except Exception as e:
-        execution_time = (time.time() - start_time) * 1000
-        logger.error(f"Booking dialog handling failed: {str(e)}", extra={
-            'execution_time': execution_time,
-            'user_message': user_msg,
-            'current_state': state
-        }, exc_info=True)
-        
-        # Error fallback
-        error_reply = "Üzgünüm, rezervasyon işleminizi tamamlarken bir sorun yaşadım. Lütfen tekrar deneyin."
-        return state, error_reply, False
+    # Eksik yok ama onay da yok → özet sor
+    elif no_missing and parsed.get("karar") != "RED":
+        reply = summary(state)
+
+    state["history"].append({"role": "assistant", "content": reply})
+    return state, reply, finished
+
+# ---------------------------------------------------------------------
+# Basit CLI testi
+# ---------------------------------------------------------------------
+if __name__ == "__main__":
+    sess = {}
+    while True:
+        u = input("👤> ")
+        sess, bot, done = handle_booking(sess, u)
+        print("🤖", bot)
+        if done:
+            break

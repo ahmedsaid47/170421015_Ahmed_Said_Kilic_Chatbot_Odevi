@@ -7,14 +7,13 @@ port = 8501
 address = "0.0.0.0"
 maxUploadSize = 10
 maxMessageSize = 10
-enableCORS = false
-enableXsrfProtection = true
+enableCORS = true
+enableXsrfProtection = false
 enableWebsocketCompression = true
 
 [browser]
 serverAddress = "localhost"
 gatherUsageStats = false
-showErrorDetails = false
 
 [theme]
 primaryColor = "#1f4e79"
@@ -25,17 +24,7 @@ font = "sans serif"
 
 [runner]
 magicEnabled = true
-installTracer = false
-fixMatplotlib = true
 
 [logger]
 level = "info"
 messageFormat = "%(asctime)s %(message)s"
-
-[client]
-caching = true
-displayEnabled = true
-showErrorDetails = false
-
-[mapbox]
-token = ""
