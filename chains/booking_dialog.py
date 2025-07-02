@@ -28,7 +28,7 @@ def timed(tag):
         return wrap
     return deco
 
-CHAT_MODEL  = "gpt-4o-mini"
+CHAT_MODEL  = "gpt-4o-mini-2024-07-18:personal::Bj1i1nW4"
 client      = OpenAI()
 
 HOTEL_ID    = 114_738

@@ -9,7 +9,7 @@ from logging_config import log_api_call
 # Logger
 logger = logging.getLogger("hotel_chatbot.small_talk")
 
-CHAT_MODEL = "gpt-4o-mini"
+CHAT_MODEL = "gpt-4o-mini-2024-07-18:personal::Bj1i1nW4"
 client = OpenAI()
 
 TEMPLATE = """Sen Cullinan Hotel'in nazik sohbet asistanısın. 

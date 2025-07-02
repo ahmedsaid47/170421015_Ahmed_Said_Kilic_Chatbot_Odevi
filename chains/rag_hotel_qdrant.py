@@ -100,7 +100,7 @@ def answer_hotel_qdrant(question: str, qdrant_client=None) -> str:
         ]
         
         completion = client.chat.completions.create(
-            model="gpt-4o-mini", 
+            model="gpt-4o-mini-2024-07-18:personal::Bj1i1nW4", 
             messages=messages,
             temperature=0.1,
             max_tokens=500
